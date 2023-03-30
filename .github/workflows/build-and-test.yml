@@ -10,8 +10,8 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          - ubuntu-18.04
           - ubuntu-20.04
+          - ubuntu-22.04
         compiler:
           - gcc
           - clang
@@ -21,7 +21,7 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
     - name: Setup dependencies
       run: |
           sudo apt update
@@ -61,6 +61,6 @@ jobs:
       run: if [ "${CC}" = "gcc" ]; then make code-coverage-capture; fi
 
     - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v2
+      uses: codecov/codecov-action@v3
       with:
         verbose: true

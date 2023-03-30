@@ -1,8 +1,10 @@
 dqlite [![CI Tests](https://github.com/canonical/dqlite/actions/workflows/build-and-test.yml/badge.svg)](https://github.com/canonical/dqlite/actions/workflows/build-and-test.yml) [![codecov](https://codecov.io/gh/canonical/dqlite/branch/master/graph/badge.svg)](https://codecov.io/gh/canonical/dqlite)
 ======
 
+[English](./README.md)|[简体中文](./README_CH.md)
+
 [dqlite](https://dqlite.io) is a C library that implements an embeddable and replicated SQL database
-engine with high-availability and automatic failover.
+engine with high availability and automatic failover.
 
 The acronym "dqlite" stands for "distributed SQLite", meaning that dqlite extends
 [SQLite](https://sqlite.org/) with a network protocol that can connect together
@@ -26,6 +28,14 @@ includes a copyright exception allowing users to statically link the library cod
 in their project and release the final work under their own terms. See the full
 [license](https://github.com/canonical/dqlite/blob/master/LICENSE) text.
 
+Compatibility
+-------------
+
+dqlite runs on Linux and requires a kernel with support for [native async
+I/O](https://man7.org/linux/man-pages/man2/io_setup.2.html) (not to be confused
+with [POSIX AIO](https://man7.org/linux/man-pages/man7/aio.7.html)), which is
+used by the libuv backend of C-raft.
+
 Try it
 -------
 
@@ -38,6 +48,8 @@ Media
 
 A talk about dqlite was given at FOSDEM 2020, you can watch it
 [here](https://fosdem.org/2020/schedule/event/dqlite/).
+
+[Here](https://gcore.com/blog/comparing-litestream-rqlite-dqlite/) is a blog post from 2022 comparing dqlite with rqlite and Litestream, other replication software for SQLite.
 
 Wire protocol
 -------------
@@ -60,7 +72,7 @@ sudo apt-get install libdqlite-dev
 Build
 -----
 
-To build ``libdqlite`` from source you'll need:
+To build libdqlite from source you'll need:
 
 * A reasonably recent version of [libuv](http://libuv.org/) (v1.8.0 or beyond).
 * A reasonably recent version of sqlite3-dev

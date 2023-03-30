@@ -5,6 +5,7 @@
 #include "./lib/assert.h"
 
 #include "command.h"
+#include "id.h"
 #include "leader.h"
 #include "tracing.h"
 #include "vfs.h"
@@ -13,6 +14,7 @@
  * be invoked. */
 static void leaderExecDone(struct exec *req)
 {
+	tracef("leader exec done id:%" PRIu64, req->id);
 	req->leader->exec = NULL;
 	if (req->cb != NULL) {
 		req->cb(req, req->status);
@@ -41,57 +43,69 @@ static int openConnection(const char *filename,
 	rc = sqlite3_extended_result_codes(*conn, 1);
 	if (rc != SQLITE_OK) {
                 tracef("extended codes failed %d", rc);
-		goto err_after_open;
+		goto err;
 	}
+
+	/* The vfs, db, gateway, and leader code currently assumes that
+	 * each connection will operate on only one DB file/WAL file
+	 * pair. Make sure that the client can't use ATTACH DATABASE to
+	 * break this assumption. We apply the same limit in open_follower_conn
+	 * in db.c.
+	 *
+	 * Note, 0 instead of 1 -- apparently the "initial database" is not
+	 * counted when evaluating this limit. */
+	sqlite3_limit(*conn, SQLITE_LIMIT_ATTACHED, 0);
 
 	/* Set the page size. */
 	sprintf(pragma, "PRAGMA page_size=%d", page_size);
 	rc = sqlite3_exec(*conn, pragma, NULL, NULL, &msg);
 	if (rc != SQLITE_OK) {
                 tracef("page size set failed %d page size %u", rc, page_size);
-		goto err_after_open;
+		goto err;
 	}
 
 	/* Disable syncs. */
 	rc = sqlite3_exec(*conn, "PRAGMA synchronous=OFF", NULL, NULL, &msg);
 	if (rc != SQLITE_OK) {
                 tracef("sync off failed %d", rc);
-		goto err_after_open;
+		goto err;
 	}
 
 	/* Set WAL journaling. */
 	rc = sqlite3_exec(*conn, "PRAGMA journal_mode=WAL", NULL, NULL, &msg);
 	if (rc != SQLITE_OK) {
                 tracef("wal on failed %d", rc);
-		goto err_after_open;
+		goto err;
 	}
 
 	rc = sqlite3_exec(*conn, "PRAGMA wal_autocheckpoint=0", NULL, NULL,
 			  &msg);
 	if (rc != SQLITE_OK) {
                 tracef("wal autocheckpoint off failed %d", rc);
-		goto err_after_open;
+		goto err;
 	}
 
 	rc =
 	    sqlite3_db_config(*conn, SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, 1, NULL);
 	if (rc != SQLITE_OK) {
                 tracef("db config failed %d", rc);
-		goto err_after_open;
+		goto err;
 	}
 
 	/* TODO: make setting foreign keys optional. */
 	rc = sqlite3_exec(*conn, "PRAGMA foreign_keys=1", NULL, NULL, &msg);
 	if (rc != SQLITE_OK) {
                 tracef("enable foreign keys failed %d", rc);
-		goto err_after_open;
+		goto err;
 	}
 
 	return 0;
 
-err_after_open:
-	sqlite3_close(*conn);
 err:
+	if (*conn != NULL) {
+		sqlite3_close(*conn);
+		*conn = NULL;
+	}
 	if (msg != NULL) {
 		sqlite3_free(msg);
 	}
@@ -113,7 +127,7 @@ int leader__init(struct leader *l, struct db *db, struct raft *raft)
 	int rc;
 	l->db = db;
 	l->raft = raft;
-	rc = openConnection(db->filename, db->config->name,
+	rc = openConnection(db->path, db->config->name,
 			    db->config->page_size, &l->conn);
 	if (rc != 0) {
                 tracef("open failed %d", rc);
@@ -221,7 +235,7 @@ static void leaderApplyFramesCb(struct raft_apply *req,
 				int status,
 				void *result)
 {
-        tracef("apply frames cb");
+	tracef("apply frames cb id:%" PRIu64, idExtract(req->req_id));
 	struct apply *apply = req->data;
 	struct leader *l = apply->leader;
 	if (l == NULL) {
@@ -259,7 +273,7 @@ static void leaderApplyFramesCb(struct raft_apply *req,
 				l->exec->status = SQLITE_IOERR;
 				break;
 		}
-		VfsAbort(vfs, l->db->filename);
+		VfsAbort(vfs, l->db->path);
 	}
 
 	raft_free(apply);
@@ -278,6 +292,7 @@ static int leaderApplyFrames(struct exec *req,
 			     dqlite_vfs_frame *frames,
 			     unsigned n)
 {
+	tracef("leader apply frames id:%" PRIu64, req->id);
 	struct leader *l = req->leader;
 	struct db *db = l->db;
 	struct command_frames c;
@@ -309,6 +324,7 @@ static int leaderApplyFrames(struct exec *req,
 	apply->leader = req->leader;
 	apply->req.data = apply;
 	apply->type = COMMAND_FRAMES;
+	idSet(apply->req.req_id, req->id);
 
 	rv = raft_apply(l->raft, &apply->req, &buf, 1, leaderApplyFramesCb);
 	if (rv != 0) {
@@ -332,34 +348,48 @@ err:
 
 static void leaderExecV2(struct exec *req)
 {
+	tracef("leader exec v2 id:%" PRIu64, req->id);
 	struct leader *l = req->leader;
 	struct db *db = l->db;
 	sqlite3_vfs *vfs = sqlite3_vfs_find(db->config->name);
 	dqlite_vfs_frame *frames;
+	uint64_t size;
 	unsigned n;
 	unsigned i;
 	int rv;
 
 	req->status = sqlite3_step(req->stmt);
 
-	rv = VfsPoll(vfs, l->db->filename, &frames, &n);
+	rv = VfsPoll(vfs, db->path, &frames, &n);
 	if (rv != 0 || n == 0) {
                 tracef("vfs poll");
 		goto finish;
 	}
 
+	/* Check if the new frames would create an overfull database */
+	size = VfsDatabaseSize(vfs, db->path, n, db->config->page_size);
+	if (size > VfsDatabaseSizeLimit(vfs)) {
+		rv = SQLITE_FULL;
+		goto abort;
+	}
+
 	rv = leaderApplyFrames(req, frames, n);
+	if (rv != 0) {
+		goto abort;
+	}
+
 	for (i = 0; i < n; i++) {
 		sqlite3_free(frames[i].data);
 	}
 	sqlite3_free(frames);
-	if (rv != 0) {
-		VfsAbort(vfs, l->db->filename);
-		goto finish;
-	}
-
 	return;
 
+abort:
+	for (i = 0; i < n; i++) {
+		sqlite3_free(frames[i].data);
+	}
+	sqlite3_free(frames);
+	VfsAbort(vfs, l->db->path);
 finish:
 	if (rv != 0) {
                 tracef("exec v2 failed %d", rv);
@@ -384,9 +414,10 @@ static void execBarrierCb(struct barrier *barrier, int status)
 int leader__exec(struct leader *l,
 		 struct exec *req,
 		 sqlite3_stmt *stmt,
+		 uint64_t id,
 		 exec_cb cb)
 {
-        tracef("leader exec");
+	tracef("leader exec id:%" PRIu64, id);
 	int rv;
 	if (l->exec != NULL) {
                 tracef("busy");
@@ -396,12 +427,14 @@ int leader__exec(struct leader *l,
 
 	req->leader = l;
 	req->stmt = stmt;
+	req->id = id;
 	req->cb = cb;
 	req->barrier.data = req;
 	req->barrier.cb = NULL;
 
 	rv = leader__barrier(l, &req->barrier, execBarrierCb);
 	if (rv != 0) {
+		l->exec = NULL;
 		return rv;
 	}
 	return 0;

@@ -49,7 +49,7 @@ abort:
 	conn__stop(c);
 }
 
-static void gateway_handle_cb(struct handle *req, int status, int type)
+static void gateway_handle_cb(struct handle *req, int status, uint8_t type, uint8_t schema)
 {
 	struct conn *c = req->data;
 	size_t n;
@@ -57,24 +57,26 @@ static void gateway_handle_cb(struct handle *req, int status, int type)
 	uv_buf_t buf;
 	int rv;
 
+	assert(schema <= req->schema);
+
 	/* Ignore results firing after we started closing. TODO: instead, we
 	 * should make gateway__close() asynchronous. */
 	if (c->closed) {
-                tracef("gateway handle cb closed");
+		tracef("gateway handle cb closed");
 		return;
 	}
 
 	if (status != 0) {
-                tracef("gateway handle cb closed status %d", status);
+		tracef("gateway handle cb status %d", status);
 		goto abort;
 	}
 
 	n = buffer__offset(&c->write) - message__sizeof(&c->response);
 	assert(n % 8 == 0);
 
-	c->response.type = (uint8_t)type;
+	c->response.type = type;
 	c->response.words = (uint32_t)(n / 8);
-	c->response.flags = 0;
+	c->response.schema = schema;
 	c->response.extra = 0;
 
 	cursor = buffer__cursor(&c->write, 0);
@@ -103,8 +105,9 @@ static void closeCb(struct transport *transport)
 	}
 }
 
-static void raft_connect(struct conn *c, struct cursor *cursor)
+static void raft_connect(struct conn *c)
 {
+	struct cursor *cursor = &c->handle.cursor;
 	struct request_connect request;
 	int rv;
         tracef("raft_connect");
@@ -125,7 +128,7 @@ static void raft_connect(struct conn *c, struct cursor *cursor)
 static void read_request_cb(struct transport *transport, int status)
 {
 	struct conn *c = transport->data;
-	struct cursor cursor;
+	struct cursor *cursor = &c->handle.cursor;
 	int rv;
 
 	if (status != 0) {
@@ -135,19 +138,20 @@ static void read_request_cb(struct transport *transport, int status)
 		return;
 	}
 
-	cursor.p = buffer__cursor(&c->read, 0);
-	cursor.cap = buffer__offset(&c->read);
+	cursor->p = buffer__cursor(&c->read, 0);
+	cursor->cap = buffer__offset(&c->read);
 
 	buffer__reset(&c->write);
 	buffer__advance(&c->write, message__sizeof(&c->response)); /* Header */
 
 	switch (c->request.type) {
 		case DQLITE_REQUEST_CONNECT:
-			raft_connect(c, &cursor);
+			raft_connect(c);
 			return;
 	}
 
-	rv = gateway__handle(&c->gateway, &c->handle, c->request.type, &cursor,
+	rv = gateway__handle(&c->gateway, &c->handle,
+			     c->request.type, c->request.schema,
 			     &c->write, gateway_handle_cb);
 	if (rv != 0) {
                 tracef("read gateway handle error %d", rv);
@@ -160,10 +164,16 @@ static int read_request(struct conn *c)
 {
 	uv_buf_t buf;
 	int rv;
+	if (UINT64_C(8) * (uint64_t)c->request.words > (uint64_t)UINT32_MAX) {
+		return DQLITE_ERROR;
+	}
 	rv = init_read(c, &buf, c->request.words * 8);
 	if (rv != 0) {
                 tracef("init read failed %d", rv);
 		return rv;
+	}
+	if (c->request.words == 0) {
+		return 0;
 	}
 	rv = transport__read(&c->transport, &buf, read_request_cb);
 	if (rv != 0) {
@@ -281,6 +291,7 @@ int conn__start(struct conn *c,
 		struct raft *raft,
 		struct uv_stream_s *stream,
 		struct raft_uv_transport *uv_transport,
+		struct id_state seed,
 		conn_close_cb close_cb)
 {
 	int rv;
@@ -295,7 +306,7 @@ int conn__start(struct conn *c,
 	c->transport.data = c;
 	c->uv_transport = uv_transport;
 	c->close_cb = close_cb;
-	gateway__init(&c->gateway, config, registry, raft);
+	gateway__init(&c->gateway, config, registry, raft, seed);
 	rv = buffer__init(&c->read);
 	if (rv != 0) {
 		goto err_after_transport_init;

@@ -6,8 +6,9 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "client.h"
+#include "lib/addr.h"
 #include "message.h"
+#include "protocol.h"
 #include "request.h"
 #include "tracing.h"
 #include "transport.h"
@@ -82,7 +83,7 @@ static void connect_work_cb(uv_work_t *work)
 	}
 
 	/* Send the initial dqlite protocol handshake. */
-	protocol = byte__flip64(DQLITE_PROTOCOL_VERSION);
+	protocol = ByteFlipLe64(DQLITE_PROTOCOL_VERSION);
 	rv = (int)write(r->fd, &protocol, sizeof protocol);
 	if (rv != sizeof protocol) {
                 tracef("write failed");
@@ -208,48 +209,26 @@ static void impl_close(struct raft_uv_transport *transport,
 	cb(transport);
 }
 
-static int parse_address(const char *address, struct sockaddr_in *addr)
-{
-	char buf[256];
-	char *host;
-	char *port;
-	char *colon = ":";
-	int rv;
-
-	/* TODO: turn this poor man parsing into proper one */
-	strncpy(buf, address, sizeof(buf)-1);
-	buf[sizeof(buf)-1] = '\0';
-	host = strtok(buf, colon);
-	port = strtok(NULL, ":");
-	if (port == NULL) {
-		port = "8080";
-	}
-
-	rv = uv_ip4_addr(host, atoi(port), addr);
-	if (rv != 0) {
-		return RAFT_NOCONNECTION;
-	}
-
-	return 0;
-}
-
 static int default_connect(void *arg, const char *address, int *fd)
 {
-	struct sockaddr_in addr;
+	struct sockaddr_in addr_in;
+	struct sockaddr *addr = (struct sockaddr *)&addr_in;
+	socklen_t addr_len = sizeof addr_in;
 	int rv;
 	(void)arg;
 
-	rv = parse_address(address, &addr);
+	rv = AddrParse(address, addr, &addr_len, "8080", 0);
 	if (rv != 0) {
 		return RAFT_NOCONNECTION;
 	}
 
-	*fd = socket(AF_INET, SOCK_STREAM, 0);
+	assert(addr->sa_family == AF_INET || addr->sa_family == AF_INET6);
+	*fd = socket(addr->sa_family, SOCK_STREAM, 0);
 	if (*fd == -1) {
 		return RAFT_NOCONNECTION;
 	}
 
-	rv = connect(*fd, (const struct sockaddr *)&addr, sizeof addr);
+	rv = connect(*fd, addr, addr_len);
 	if (rv == -1) {
 		close(*fd);
 		return RAFT_NOCONNECTION;
@@ -269,6 +248,7 @@ int raftProxyInit(struct raft_uv_transport *transport, struct uv_loop_s *loop)
 	i->connect.f = default_connect;
 	i->connect.arg = NULL;
 	i->accept_cb = NULL;
+	transport->version = 1;
 	transport->impl = i;
 	transport->init = impl_init;
 	transport->listen = impl_listen;

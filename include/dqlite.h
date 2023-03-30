@@ -9,7 +9,7 @@
  * Version.
  */
 #define DQLITE_VERSION_MAJOR    1
-#define DQLITE_VERSION_MINOR    10
+#define DQLITE_VERSION_MINOR    14
 #define DQLITE_VERSION_RELEASE  0
 #define DQLITE_VERSION_NUMBER (DQLITE_VERSION_MAJOR *100*100 + DQLITE_VERSION_MINOR *100 + DQLITE_VERSION_RELEASE)
 
@@ -18,9 +18,11 @@ int dqlite_version_number (void);
 /**
  * Error codes.
  */
-#define DQLITE_ERROR 1  /* Generic error */
-#define DQLITE_MISUSE 2 /* Library used incorrectly */
-#define DQLITE_NOMEM 3  /* A malloc() failed */
+enum {
+    DQLITE_ERROR = 1, /* Generic error */
+    DQLITE_MISUSE,    /* Library used incorrectly */
+    DQLITE_NOMEM      /* A malloc() failed */
+};
 
 /**
  * Dqlite node handle.
@@ -44,14 +46,17 @@ typedef unsigned long long dqlite_node_id;
  * created with a different ID. The very first node, used to bootstrap a new
  * cluster, must have ID #1. Every time a node is started again, it must be
  * passed the same ID.
- *
+
  * The @address argument is the network address that clients or other nodes in
  * the cluster must use to connect to this dqlite node. If no custom connect
  * function is going to be set using dqlite_node_set_connect_func(), then the
- * format of the string must be "<HOST>:<PORT>", where <HOST> is an IPv4/IPv6
- * address or a DNS name, and <PORT> is a port number. Otherwise if a custom
- * connect function is used, then the format of the string must by whatever the
- * custom connect function accepts.
+ * format of the string must be "<HOST>" or "<HOST>:<PORT">, where <HOST> is a
+ * numeric IPv4/IPv6 address and <PORT> is a port number. The port number
+ * defaults to 8080 if not specified. If a port number is specified with an
+ * IPv6 address, the address must be enclosed in square brackets "[]".
+ *
+ * If a custom connect function is used, then the format of the string must by
+ * whatever the custom connect function accepts.
  *
  * The @data_dir argument the file system path where the node should store its
  * durable data, such as Raft log entries containing WAL frames of the SQLite
@@ -60,6 +65,12 @@ typedef unsigned long long dqlite_node_id;
  * No reference to the memory pointed to by @address and @data_dir is kept by
  * the dqlite library, so any memory associated with them can be released after
  * the function returns.
+ *
+ * Even if an error is returned, the caller should call dqlite_node_destroy()
+ * on the dqlite_node* value pointed to by @n, and calling dqlite_node_errmsg()
+ * with that value will return a valid error string. (In some cases *n will be
+ * set to NULL, but dqlite_node_destroy() and dqlite_node_errmsg() will handle
+ * this gracefully.)
  */
 int dqlite_node_create(dqlite_node_id id,
 		       const char *address,
@@ -82,12 +93,19 @@ void dqlite_node_destroy(dqlite_node *n);
  * The given address might match the one passed to @dqlite_node_create or be a
  * different one (for example if the application wants to proxy it).
  *
- * The format of the @address argument must be either "<HOST>:<PORT>", where
- * <HOST> is an IPv4/IPv6 address or a DNS name and <PORT> is a port number, or
- * "@<PATH>", where <PATH> is an abstract Unix socket path. The special string
- * "@" can be used to automatically select an available abstract Unix socket
+ * The format of the @address argument must be one of 
+ *
+ * 1. "<HOST>"
+ * 2. "<HOST>:<PORT>"
+ * 3. "@<PATH>"
+ *
+ * Where <HOST> is a numeric IPv4/IPv6 address, <PORT> is a port number, and
+ * <PATH> is an abstract Unix socket path. The port number defaults to 8080 if
+ * not specified. In the second form, if <HOST> is an IPv6 address, it must be
+ * enclosed in square brackets "[]". In the third form, if <PATH> is empty, the
+ * implementation will automatically select an available abstract Unix socket
  * path, which can then be retrieved with dqlite_node_get_bind_address().
-
+ *
  * If an abstract Unix socket is used the dqlite node will accept only
  * connections originating from the same process.
  *
@@ -178,6 +196,16 @@ int dqlite_node_set_failure_domain(dqlite_node *n, unsigned long long code);
  */
 int dqlite_node_set_snapshot_params(dqlite_node *n, unsigned snapshot_threshold,
                                     unsigned snapshot_trailing);
+
+/**
+ * WARNING: This is an experimental API.
+ *
+ * By default dqlite holds the SQLite database file and WAL in memory. By enabling
+ * disk-mode, dqlite will hold the SQLite database file on-disk while keeping the WAL
+ * in memory. Has to be called after `dqlite_node_create` and before
+ * `dqlite_node_start`.
+ */
+int dqlite_node_enable_disk_mode(dqlite_node *n);
 
 /**
  * Start a dqlite node.
@@ -287,6 +315,8 @@ dqlite_node_id dqlite_generate_node_id(const char *address);
  */
 int dqlite_vfs_init(sqlite3_vfs *vfs, const char *name);
 
+int dqlite_vfs_enable_disk(sqlite3_vfs *vfs);
+
 /**
  * Release all memory used internally by a SQLite VFS object that was
  * initialized using @qlite_vfs_init.
@@ -368,6 +398,11 @@ int dqlite_vfs_shallow_snapshot(sqlite3_vfs *vfs,
 				struct dqlite_buffer bufs[],
 				unsigned n);
 
+int dqlite_vfs_snapshot_disk(sqlite3_vfs *vfs,
+				const char *filename,
+				struct dqlite_buffer bufs[],
+				unsigned n);
+
 /**
  * Return the number of database pages (excluding WAL).
  */
@@ -383,4 +418,12 @@ int dqlite_vfs_restore(sqlite3_vfs *vfs,
 		       const void *data,
 		       size_t n);
 
+/**
+ * Restore a snapshot of the main database file and of the WAL file.
+ */
+int dqlite_vfs_restore_disk(sqlite3_vfs *vfs,
+		       const char *filename,
+		       const void *data,
+		       size_t main_size,
+		       size_t wal_size);
 #endif /* DQLITE_H */

@@ -50,7 +50,7 @@ void test_server_tear_down(struct test_server *s)
 	test_dir_tear_down(s->dir);
 }
 
-void test_server_start(struct test_server *s)
+void test_server_start(struct test_server *s, const MunitParameter params[])
 {
 	int rv;
 
@@ -66,24 +66,41 @@ void test_server_start(struct test_server *s)
 	rv = dqlite_node_set_network_latency_ms(s->dqlite, 10);
 	munit_assert_int(rv, ==, 0);
 
+	const char *snapshot_threshold_param = munit_parameters_get(params,
+							    SNAPSHOT_THRESHOLD_PARAM);
+	if (snapshot_threshold_param != NULL) {
+		unsigned threshold = (unsigned)atoi(snapshot_threshold_param);
+		rv = dqlite_node_set_snapshot_params(s->dqlite, threshold, threshold);
+		munit_assert_int(rv, ==, 0);
+	}
+
+	const char *disk_mode_param = munit_parameters_get(params, "disk_mode");
+	if (disk_mode_param != NULL) {
+		bool disk_mode = (bool)atoi(disk_mode_param);
+		if (disk_mode) {
+			rv = dqlite_node_enable_disk_mode(s->dqlite);
+			munit_assert_int(rv, ==, 0);
+		}
+	}
+
 	rv = dqlite_node_start(s->dqlite);
 	munit_assert_int(rv, ==, 0);
 
 	test_server_client_connect(s, &s->client);
 }
 
-struct client *test_server_client(struct test_server *s)
+struct client_proto *test_server_client(struct test_server *s)
 {
 	return &s->client;
 }
 
-void test_server_client_reconnect(struct test_server *s, struct client *c)
+void test_server_client_reconnect(struct test_server *s, struct client_proto *c)
 {
 	test_server_client_close(s, c);
 	test_server_client_connect(s, c);
 }
 
-void test_server_client_connect(struct test_server *s, struct client *c)
+void test_server_client_connect(struct test_server *s, struct client_proto *c)
 {
 	int rv;
 	int fd;
@@ -95,11 +112,10 @@ void test_server_client_connect(struct test_server *s, struct client *c)
 	munit_assert_int(rv, ==, 0);
 }
 
-void test_server_client_close(struct test_server *s, struct client *c)
+void test_server_client_close(struct test_server *s, struct client_proto *c)
 {
 	(void) s;
 	clientClose(c);
-	close(c->fd);
 }
 
 static void setOther(struct test_server *s, struct test_server *other)
